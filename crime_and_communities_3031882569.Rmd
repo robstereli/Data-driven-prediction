@@ -1,0 +1,488 @@
+---
+title: "Crime and Communities"
+output:
+  html_document: default
+---
+
+**Name: ** Robbie Li          
+**SID: ** 3031882569
+ 
+
+The crime and communities dataset contains crime data from communities in the United States. The data combines socio-economic data from the 1990 US Census, law enforcement data from the 1990 US LEMAS survey, and crime data from the 1995 FBI UCR. More details can be found at https://archive.ics.uci.edu/ml/datasets/Communities+and+Crime+Unnormalized.
+
+The dataset contains 125 columns total; $p=124$ predictive and 1 target (ViolentCrimesPerPop). There are $n=1994$ observations. These can be arranged into an $n \times p = 1994 \times 127$ feature matrix $\mathbf{X}$, and an $n\times 1 = 1994 \times 1$ response vector $\mathbf{y}$ (containing the observations of ViolentCrimesPerPop).
+
+Once downloaded (from bCourses), the data can be loaded as follows.
+
+```{r}
+library(readr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(glmnet)
+library(class)
+library(randomForest)
+```
+
+
+```{r}
+CC <- read_csv("data_files/crime_and_communities_data.csv")
+print(dim(CC))
+y <- CC$ViolentCrimesPerPop
+X <- subset(CC, select = -c(ViolentCrimesPerPop))
+```
+
+
+# Dataset exploration
+
+In this section, you should provide a thorough exploration of the features of the dataset. Things to keep in mind in this section include:
+
+- Which variables are categorical versus numerical?
+- What are the general summary statistics of the data? How can these be visualized?
+- Is the data normalized? Should it be normalized?
+- Are there missing values in the data? How should these missing values be handled? 
+- Can the data be well-represented in fewer dimensions?
+
+### Variable Identification
+
+```{r}
+colnames(X)
+```
+Above is the list of all 124 regressors. By looking up the metadata on [UCI machine learning repository](https://archive.ics.uci.edu/ml/datasets/Communities+and+Crime+Unnormalized), we know that almost all of the regressors are numeric.  
+ 
+The only exception is LemasGangUnitDeploy: gang unit deployed (numeric - integer - but really nominal - 0 means NO, 10 means YES, 5 means Part Time)
+
+The objective of this project is to build a predictive model for **ViolentCrimesPerPop**: total number of violent crimes per 100K popuation, which is also a numeric value.   
+
+> Let's first understand the sample distribution of this target variable, and then explore the distributions of a few regressors. We will focus on 1. population; 2. percentage of urban environment; 3. median income; and 4. percentage of unemployment. By exploring the structures within the data, we hope to extract insight for the later regression task. 
+
+### Univariate Exploration
+##### _Target variable a.k.a: y_ 
+
+```{r}
+sum(is.na(y))
+```
+We are grateful that none of the target variables are missing
+
+```{r}
+summary(y)
+```
+
+
+```{r}
+boxplot(y)
+ggplot(data.frame(y), aes(y)) + geom_histogram(binwidth=5)
+```
+
+
+>* From the summary statistics: we see that y ranges from 0 to 4877.1, but 75% of the data are smaller than 800. 
+>* From the boxplot: we see that y has outliers. Those with y > 2000 are considered outliers (Q3 + 1.5 IQR)
+>* From the histogram: we see that y has a long right tail. 
+
+> **Given the outliers and the one-sided fat-tailed distribution, it would not be wise to fit a model on all y's. It is probably best to do some kind of localization as in kNN or clustering or binning. We will explore this idea in the feature engineering section and in eventual model fitting.**
+
+##### _Population_ 
+
+```{r}
+boxplot <- boxplot(X$population, ylab = "population", main = "Boxplot for population")
+```
+
+> Population has a lot of outliers. Let's visualize what the sampling distribution looks like without outliers.
+
+
+```{r}
+pop.wo.outliers <- X$population[ which(X$population%in% boxplot$out)]
+ggplot(data.frame(pop.wo.outliers), aes(pop.wo.outliers)) + geom_histogram(bins = 100) + ggtitle("Histogram of population without outliers")
+
+```
+
+>* From the boxplot: we see there are a lot of outliers for the population regressor
+>* From the histogram: we see that even after removing outliers, the distribution is still centered around small populations. 
+
+>**This shows that America's large cities are really anomalies.**
+
+
+##### _Percentage of urban environment_
+
+```{r}
+boxplot <- boxplot(X$pctUrban, ylab = "pctUrban", main = "Boxplot for Percentage of Urban Environment")
+```
+
+```{r}
+ggplot(data.frame(X$pctUrban), aes(X$pctUrban)) + geom_histogram() + ggtitle("Histogram of percentage of Urban Environment")
+```
+
+>**Very interestingly, the sampling distribution for pctUrban shows a bimodal feature. This inspires us to create a new dummy varialbe Urbanized to distinguish urban vs non-urban. This new feature would capture most of the information from pctUrban while reducing model complexity!**
+
+```{r}
+dummy <- as.numeric(X$pctUrban > 50)
+```
+
+
+##### _Median Income_
+
+```{r}
+boxplot(X$medIncome, ylab = "Median Income", main = "Boxplot for Median Income")
+```
+
+```{r}
+ggplot(data.frame(X$medIncome), aes(X$medIncome)) + geom_histogram() + ggtitle("Histogram of median income")
+```
+
+>**While median income has some outliers, the extent of anomaly for these outliers is less than that of population outliers. The sampling distribution is more evenly spread out.**
+
+
+##### _Unemployment Rate_
+
+```{r}
+boxplot(X$PctUnemployed, ylab = "PctUnemployed", main = "Boxplot for Unemployment Rate")
+```
+
+```{r}
+ggplot(data.frame(X$PctUnemployed), aes(X$PctUnemployed)) + geom_histogram() + ggtitle("Histogram of Unemployment Rate")
+```
+
+>**The distribution of unemployment rate is quite even, almost forming a bell shape.**
+
+
+> Top insights from univariate exploration:
+
+>* Data seem to have clusters - apply clustering/kNN or engineer categorical features.
+>* Population has a lot of outliers - run a clustering algorithm to find clusters of population, and then analyze trends separately.
+>* Percentage of urban environment appears bimodal - engineer binary dummy to reduce complexity.
+
+
+
+### Missing Values: impute with kNN not delete
+```{r}
+index <- c()
+cols <- c()
+props <- c()
+col.names <- colnames(X)
+
+for (i in 1:ncol(X)) {
+  col <- col.names[i]
+  prop <- sum(is.na(X[,col])) / nrow(X)
+  if (prop > 0) {
+    cols <- c(col, cols)
+    props <- c(prop, props)
+    index <- c(i, index)
+  }
+}
+miss.table <- data.frame(index,columnNames=cols, propMiss = props )
+print(miss.table)
+```
+
+The above table shows the columns that have missing values and the corresponding percentages of missing values. 
+
+*Notice that most of these columns relate to police*
+
+>*Because missing value percentages could be as high as 0.84, it is not wise to drop rows. 
+>*Because the columns with missing values are mostly about the police department, and we are building a model to predict crime rate, it is not wise to drop these columns. 
+
+*Now we apply kNN (k=1) to impute data for all of these columns*
+
+```{r}
+X.complete <- X[complete.cases(X),] 
+##X.clean: having removed columns that used to contain n.a's and rows that used to contain n.a.'s
+X.clean <- X.complete[,-miss.table$index]
+##X.teat: having removed columns that used to contain n.a's
+X.test <- X[, -miss.table$index]
+
+for (i in miss.table$index) {
+  X[,i] <- as.numeric(knn(train = X.clean, test = X.test, cl= unlist(X.complete[,i]), k = 1))
+}
+```
+
+```{r}
+sum(is.na(X))
+```
+Great, there are no missing values in X anymore. 
+
+
+### Outliers: binning not delete
+
+**The idea here is to identify outliers by looking at the height. If the height for a datapoint is really large, it means the datapoint is an outlier. We will then create a categorical variable to represent such an internal data structure. This will increase the accuracy of regression algorithm.**
+
+```{r}
+clust <- hclust(dist(y), method="single")
+plot(clust)
+```
+
+```{r}
+## By visually examining the giant tree above, I decided to have height cutoff of 100. 
+## Any groups below h = 100 are sufficiently similar to each other; any groups above h = 100 are outliers
+cut.result <- cutree(clust, h = 100)
+summary(factor(cut.result))
+```
+```{r}
+hist(y[which(cut.result != 1)], main = "histogram for outliers (groups 2-6)", xlab = "y value" )
+```
+```{r}
+X$group <- cut.result
+```
+
+
+### Variable Transformation and Feature Engineering
+##### _Normalize X_
+All numeric variables need to be normalized, to avoid overinfluence due to variable scale.  
+Categorical variables need not.
+
+```{r, echo = F}
+X[,-125] <- scale(X[,-125])
+```
+
+##### _Adding a new feature: Indicator for Urban vs. rural_
+
+**During univariate exploration, we realized that pctUrban has a bimodal distribution. That inspired us to add an indicator variable for whether the region is urban or not. We hope the engineered feature will be able to capture most of the information in pctUrban and replace pctUrban during dimension reduction and model selection. This should help reduce model complexity. Whether our hope is realistic or not, adding this dummy won't hurt.**
+
+```{r}
+X$urbanDummy <- dummy
+```
+
+### Dimension Reduction
+##### _Visualizing Correlation between Variables_
+
+The following code creates a correlation heat map for all the 126 regressors (126 instead of 124 because we did some feature engineering).
+
+```{r}
+# Get lower triangle of the correlation matrix
+  get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+  }
+  # Get upper triangle of the correlation matrix
+  get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+```
+
+```{r}
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+```
+
+```{r}
+generate.heat.map <- function(X) {
+  cormat <- round(cor(X),2)
+  # Reorder the correlation matrix
+  cormat <- reorder_cormat(cormat)
+  upper_tri <- get_upper_tri(cormat)
+  # Melt the correlation matrix
+  melted_cormat <- melt(upper_tri, na.rm = TRUE)
+  # Create a ggheatmap
+  ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+              geom_tile(color = "white")+
+              scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+              midpoint = 0, limit = c(-1,1), space = "Lab", 
+              name="Pearson\nCorrelation") +
+              theme_minimal()+ # minimal theme
+              theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+              size = 12, hjust = 1))+
+              coord_fixed()
+  # Print the heatmap
+  print(ggheatmap)
+}
+```
+
+```{r}
+generate.heat.map(X)
+```
+
+##### _Dimension Reduction through PCA_
+```{r}
+pca <- prcomp(X)
+screeplot(pca, npcs = 20, type = "lines", main = "variance explained by each PC's")
+```
+
+**It seems the "elbow" appears at #PC = 3.**
+
+```{r}
+generate.heat.map(pca$x)
+```
+
+**We see that PC's are orthogonal on each other.**
+
+
+
+# Regression task
+### Splitting Data 60/20/20
+```{r}
+set.seed(1)
+
+n <-  length(y)
+randomIndex <-  sample(1:n)
+## Splitting data for multiclass classification
+trainIndex <- randomIndex[1:round(0.6*n)]
+validationIndex <- randomIndex[(round(0.6*n) + 1) : round(0.8*n)]
+testIndex <- randomIndex[(round(0.8*n) + 1) : n]
+## Checking we have successfully splitted the data
+n == length(trainIndex) + length(validationIndex) + length(testIndex)
+
+
+y.train <- y[trainIndex]
+y.valid <- y[validationIndex]
+y.test <- y[testIndex]
+
+
+## Dimension reduced X
+X.pca <- pca$x[, 1:3] 
+X.train.pca <- X.pca[trainIndex,]
+X.valid.pca <- X.pca[validationIndex,]
+X.test.pca <- X.pca[testIndex,]
+
+## full X
+X.train <- X[trainIndex,]
+X.valid <- X[validationIndex,]
+X.test <- X[testIndex,]
+```
+
+### Define loss --> MSE
+```{r}
+mse <- function(predicted, actual) {
+  return(mean((predicted - actual)^2))
+}
+```
+
+
+### Model 1: Multivariate Linear Regression (without dimension reduction)
+
+```{r}
+mod1 <- lm(y.train~., data.frame(X.train))
+pred <- predict(mod1, data.frame(X.valid))
+mse(pred, y.valid)
+```
+
+**The out of sample MSE, computed with a validation set is 120389.1 for model 1.**
+
+### Model 2: Multivariate Linear Regression (with top 10 regressors)
+**We find regressors that are most correlated with y and use the top 10 to fit a model**
+
+```{r}
+top.regressor <- data.frame(index = 1:ncol(X), varName = row.names(cor(X, y)), co = cor(X, y)) %>% arrange(desc(co))
+top.regressor <- top.regressor[1:10,]
+top.regressor
+```
+
+**Interestingly, the top predictor for crime rate is percentage of kids born to unmarried parents!**
+
+```{r}
+generate.heat.map(X[,top.regressor$index])
+```
+
+> The top 10 regressors are covariate with each other.
+
+```{r}
+X.10var <- X[,top.regressor$index]
+X.train10var <- X.10var[trainIndex,]
+X.valid10var <- X.10var[validationIndex,]
+X.test10var <- X.10var[testIndex,]
+```
+
+```{r}
+mod2 <- lm(y.train~., data.frame(X.train10var))
+pred <- predict(mod2, data.frame(X.valid10var))
+mse(pred, y.valid)
+```
+
+**The out-of-sample MSE for this naive dimension reduced model is worse than the full model... it is 133725.4**
+
+
+### Model 3: Lasso Regression with all data (dimension reduction via penalty)
+
+```{r}
+set.seed(99)
+cvfit <- cv.glmnet(as.matrix(X.train), y.train, family = "gaussian")
+plot(cvfit)
+```
+
+```{r}
+lambda.op <- cvfit$lambda.min
+print(lambda.op)
+```
+
+**Cross Validation shows that the optimal lambda is 3.7617.**
+
+```{r}
+mod3 <- glmnet(as.matrix(X.train), y.train, family = "gaussian", lambda = lambda.op)
+pred <- predict.glmnet(mod3, as.matrix(X.valid))
+mse(pred, y.valid)
+```
+
+**The out of sample MSE, computed with a validation set is 110876.1 for model 3, better than the naive model!**
+
+
+### Model 4: PCR (dimension reduced through PCA)
+
+```{r}
+mod4 <- lm(y.train~., data = data.frame(X.train.pca))
+summary(mod4)
+mse(predict(mod4, data.frame(X.valid.pca)), y.valid)
+```
+
+**The out of sample MSE, computed with a validation set is 191609.7 for model 3.**
+
+### Model 5: Random Forest with all data
+
+```{r}
+set.seed(8)
+rf <- randomForest(y.train~., data = data.frame(X.train), xtest = data.frame(X.valid), ytest = y.valid)
+print(rf)
+```
+**The out of sample MSE, computed with a validation set is 91358.81 for model 4.**
+
+### Model 6: kNN with all data
+```{r}
+set.seed(100)
+## Use Validation Set to tune k
+mse_vec <- c()
+for(k in 1:10) {
+  knnPrediction <-  as.numeric(knn(train = X.train, test = X.valid, cl = y.train, k))
+  mse_vec[k] <- mse(knnPrediction, y.valid)
+}
+```
+
+
+```{r}
+plot(1:k, mse_vec, type = "l", main = "accuracy of kNN with different k", xlab = "k")
+```
+
+```{r}
+which.min(mse_vec)
+```
+```{r}
+mse_vec[5]
+```
+
+**Cross validation shows that the best performing kNN is when k = 5, and the out-of-sample MSE is 225664.5**
+
+### Model Selection and Final Prediction
+
+>Here is the bottomline from multiclass classification
+
+>* model 1: multivariate linear regression with all data produces a model with MSE = 120389.1
+>* model 2: With naive model selection, we produce a model with MSE = 133725.4
+>* model 3: lasso regression has MSE = 110876.1
+>* model 3: Using 3 PC's, PCR produces MSE = 191609.7
+>* model 4: random forest produced a model with MSE = 91358.81
+>* model 5: kNN has MSE = 225664.5
+
+> For this task, we will use model 4 for prediction.
+
+```{r}
+set.seed(21)
+rf <- randomForest(c(y.train, y.valid)~., data = data.frame(rbind(X.train, X.valid)), xtest = data.frame(X.test), ytest = y.test)
+print(rf)
+```
+
+> Using more data (training + validation) to fit a random forest, the out-of-sample MSE is 97444.28. 
+
+# Reference
+1. Sunil Ray, [A Comprehensive Guide to Data Exploration](https://www.analyticsvidhya.com/blog/2016/01/guide-data-exploration/)
+2. STHDA, [ggplot2 : Quick correlation matrix heatmap - R software and data visualization](http://www.sthda.com/english/wiki/ggplot2-quick-correlation-matrix-heatmap-r-software-and-data-visualization)
+

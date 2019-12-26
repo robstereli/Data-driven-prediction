@@ -1,0 +1,613 @@
+---
+title: "Fashion MNIST"
+output:
+  html_document: default
+---
+
+
+**Name: ** Robbie Li  
+**SID: ** 3031882569  
+ø
+The dataset contains $n=18,000$ different $28\times 28$ grayscale images of clothing, each with a label of either _shoes_, _shirt_, or _pants_ (6000 of each). If we stack the features into a single vector, we can transform each of these observations into a single $28*28 = 784$ dimensional vector. The data can thus be stored in a $n\times p = 18000\times 784$ data matrix $\mathbf{X}$, and the labels stored in a $n\times 1$ vector $\mathbf{y}$.
+
+Once downloaded, the data can be read as follows.
+
+```{r, echo = T, results = 'hide'}
+library(readr)
+library(MASS)
+library(ROCR)
+library(glmnet)
+library(randomForest)
+library(class)
+```
+
+
+```{r}
+FMNIST <- read_csv("data_files/FashionMNIST.csv")
+y <- FMNIST$label
+X <- subset(FMNIST, select = -c(label))
+```
+```{r, echo=FALSE}
+rm('FMNIST') #remove from memory -- it's a relatively large file
+```
+
+# Data exploration and dimension reduction
+
+In this section, you will experiment with representing the images in fewer dimensions than $28*28 = 784$. You can use any of the various dimension reduction techniques introduced in class. How can you visualize these lower dimensional representations as images? How small of dimensionality can you use and still visually distinguish images from different classes?
+
+### Univariate Exploration : target variable
+```{r}
+table(y)
+```
+> We see that there are three classes in this dataset. 
+> y = 0 ---> shirt  
+> y = 1 ---> pants  
+> y = 2 ---> shoes    
+
+### Univariate Exploration : regressors
+```{r}
+boxplot(X[,1:30], xlab = "pixel number", ylab = "saturation of color")
+```
+
+Looking at the box plot, we realize some pixels have a wider spread in color saturation than others. 
+
+**There are pixels that are mostly white (pixel 0 for example), but there are also pixels that have a wider variety of color saturation.** 
+
+> This means that some pixels are quite informative (high variance), while others are redundant, which motivates us to conduct dimension reduction. 
+
+
+### Dimension Reduction: Naive Approach
+
+> The idea here is to only show pixels with the top most in-column variances, while setting saturations of other pixels to 0. 
+
+```{r}
+in.column.variances <-  apply(X, 2, var)
+index <- sort(in.column.variances, decreasing = T,index.return = T)$ix
+```
+
+```{r}
+X.naive.reduced <- X
+X.naive.reduced[,-index[1:round(0.1*784)]] <- 0
+```
+
+```{r}
+boxplot(X.naive.reduced[1:100], xlab = "pixel number", ylab = "saturation of color")
+```
+
+
+**The boxplot shows that this dimension reduction method simply knocks out "unimportant" pixels and preserves ones with high variances**
+
+```{r}
+set.seed(1)
+random.rows = sample(seq(1,nrow(X)),3)
+no.pixels.used <- round(c(0.1, 0.3, 0.5) * 784)
+
+for (t in no.pixels.used) {
+  
+  X.naive.reduced <- X
+  X.naive.reduced[,-index[1:t]] <- 0
+  
+  X2 <- matrix(as.numeric(X.naive.reduced[random.rows[1],]), ncol=28, nrow=28, byrow = TRUE)
+  X2 <- apply(X2, 2, rev)
+
+  X0 <- matrix(as.numeric(X.naive.reduced[random.rows[2],]), ncol=28, nrow=28, byrow = TRUE)
+  X0 <- apply(X0, 2, rev)
+
+  X1 <- matrix(as.numeric(X.naive.reduced[random.rows[3],]), ncol=28, nrow=28, byrow = TRUE)
+  X1 <- apply(X1, 2, rev)
+  
+  layout(matrix(c(1,2,3, 4,4,4), 2, 3, byrow = TRUE))
+  image(1:28, 1:28, t(X2), col=gray((0:255)/255), main= sprintf("Picture generated using %s pixels", t))
+  image(1:28, 1:28, t(X0), col=gray((0:255)/255), main= sprintf("Picture generated using %s pixels", t))
+  image(1:28, 1:28, t(X1), col=gray((0:255)/255), main= sprintf("Picture generated using %s pixels", t))
+}
+
+rm('X.naive.reduced') #remove from memory -- it's a relatively large file
+```
+
+```{r}
+y[random.rows]
+```
+
+__*The correct classes are shoes (2), pants (1), shirt (0).*__
+
+__With only 10% of the pixels preserved, we could barely make out anything in the pictures.__
+
+__With only 30% of the pixels preserved, we can sort of make out which categories these pictures belong to, but not quite.__
+
+__With 50% of the pixels are knocked out, we can pretty confidently tell the classes apart.__
+
+
+> This naive approach does not work well. It takes at least 50% of the top-varying pixels to allow for visually distinguishing images from different classes. We need more sophisticated methods.
+
+
+
+### Dimension Reduction: PCA
+
+> The idea here is to use PCA to identify PC's and rotation matrices. Then use a subset of all PC's and their corresponding rotation matrices (do an inner product) to recover the pixels.
+
+```{r}
+# Note here we are setting center to false. We are dealing with pixels; we would lose interpretability/image recoverability if we centered pixel vaules to 0.
+pca <- prcomp(X, center = F)
+```
+
+
+```{r}
+no.pcs.used <- round(c(0.1, 0.05, 0.01, 0.002)* 784)
+no.pcs.used
+```
+
+**We are using 78, 39, 5, and 2 PC's to see how much dimension we could reduce while preserving the ability to visiually discern image cateogries.**
+
+```{r}
+for (t in no.pcs.used) {
+  
+  X.pca <-  pca$x[, 1:t]  %*% t(pca$rotation[,1:t])
+  X2 <- matrix(as.numeric(X.pca[random.rows[1],]), ncol=28, nrow=28, byrow = TRUE)
+  X2 <- apply(X2, 2, rev)
+
+  X0 <- matrix(as.numeric(X.pca[random.rows[2],]), ncol=28, nrow=28, byrow = TRUE)
+  X0 <- apply(X0, 2, rev)
+
+  X1 <- matrix(as.numeric(X.pca[random.rows[3],]), ncol=28, nrow=28, byrow = TRUE)
+  X1 <- apply(X1, 2, rev)
+  
+  layout(matrix(c(1,2,3, 4,4,4), 2, 3, byrow = TRUE))
+  image(1:28, 1:28, t(X2), col=gray((0:255)/255), main= sprintf("%s PC's", t))
+  image(1:28, 1:28, t(X0), col=gray((0:255)/255), main= sprintf("%s PC's", t))
+  image(1:28, 1:28, t(X1), col=gray((0:255)/255), main= sprintf("%s PC's", t))
+}
+```
+
+__*The correct classes are shoes (2), pants (1), shirt (0).*__
+
+__With more than 8 PC's, we could tell the categories apart pretty well.__
+
+__With 2 PC's, it becomes uncertain: pants and shirts start to look quite alike.__
+
+```{r}
+screeplot(pca, npcs = 20, type = "lines", main = "variance explained by each PC's")
+```
+
+> Shown in the screeplot above, 5 is where the "elbow" appears. Going forward, we will use 5 PC's as the reduced dataset - where appropriate. 
+
+# Classification task
+
+### Splitting data: 60/20/20
+```{r}
+set.seed(1)
+
+X.reduced <- pca$x[, 1:5] 
+rm('X') #remove from memory -- it's a relatively large file
+n <-  length(y)
+randomIndex <-  sample(1:n)
+## Splitting data for multiclass classification
+trainIndex <- randomIndex[1:round(0.6*n)]
+validationIndex <- randomIndex[(round(0.6*n) + 1) : round(0.8*n)]
+testIndex <- randomIndex[(round(0.8*n) + 1) : n]
+## Checking we have successfully splitted the data
+n == length(trainIndex) + length(validationIndex) + length(testIndex)
+
+X.train <- X.reduced[trainIndex,]
+y.train <- y[trainIndex]
+X.valid <- X.reduced[validationIndex,]
+y.valid <- y[validationIndex]
+X.test <- X.reduced[testIndex,]
+y.test <- y[testIndex]
+```
+
+```{r}
+set.seed(123)
+
+## Splitting data for binary classificaiton 1/2
+X12.reduced <- X.reduced[y!=0, ]
+y12 <- y[y!=0]
+n <- length(y12)
+randomIndex <-  sample(1:n)
+trainIndex <- randomIndex[1:round(0.6*n)]
+validationIndex <- randomIndex[(round(0.6*n) + 1) : round(0.8*n)]
+testIndex <- randomIndex[(round(0.8*n) + 1) : n]
+
+X12.train <- X12.reduced[trainIndex,]
+y12.train <- y12[trainIndex]
+X12.valid <- X12.reduced[validationIndex,]
+y12.valid <- y12[validationIndex]
+X12.test <- X12.reduced[testIndex,]
+y12.test <- y12[testIndex]
+
+## Splitting data for binary classificaiton 1/0
+X10.reduced <- X.reduced[y!=2, ]
+y10 <- y[y!=2]
+n <- length(y10)
+randomIndex <-  sample(1:n)
+trainIndex <- randomIndex[1:round(0.6*n)]
+validationIndex <- randomIndex[(round(0.6*n) + 1) : round(0.8*n)]
+testIndex <- randomIndex[(round(0.8*n) + 1) : n]
+
+X10.train <- X10.reduced[trainIndex,]
+y10.train <- y10[trainIndex]
+X10.valid <- X10.reduced[validationIndex,]
+y10.valid <- y10[validationIndex]
+X10.test <- X10.reduced[testIndex,]
+y10.test <- y10[testIndex]
+
+## Splitting data for binary classificaiton 0/2
+X02.reduced <- X.reduced[y!=1, ]
+y02 <- y[y!=1]
+n <- length(y02)
+randomIndex <-  sample(1:n)
+trainIndex <- randomIndex[1:round(0.6*n)]
+validationIndex <- randomIndex[(round(0.6*n) + 1) : round(0.8*n)]
+testIndex <- randomIndex[(round(0.8*n) + 1) : n]
+
+X02.train <- X02.reduced[trainIndex,]
+y02.train <- y02[trainIndex]
+X02.valid <- X02.reduced[validationIndex,]
+y02.valid <- y02[validationIndex]
+X02.test <- X02.reduced[testIndex,]
+y02.test <- y02[testIndex]
+```
+
+### Binary Classification: pants(1) vs shoes(2)
+```{r}
+## transforming y12 into zeros and ones
+y12.train <- y12.train - 1
+y12.valid <- y12.valid - 1 ## used to tune hyper parameters
+y12.test <- y12.test - 1 ## used to estimate out-of-sample MSE
+```
+
+##### _Model 1: Logistic regression_
+```{r}
+mod1 <- glm(formula = y ~ .-y, family=binomial, data = data.frame(X12.train, y = y12.train))
+
+predictValid <- predict.glm(mod1, data.frame(X12.valid), type = "response") 
+ROCRpred <- prediction(predictValid, y12.valid)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, print.cutoffs.at=seq(0,1,by=0.1))
+```
+
+**As the ROC curve indicates, the logistic regression has really good out-of-sample performance (shown using validation set) for most cutoffs. We will take 0.5 as the cutoff.**
+
+```{r}
+sum(round(predictValid) == y12.valid)/length(y12.valid)
+```
+**The out-of-sample (using validation set) classification accuracy is 99.96%**
+
+##### _Model 2: Logistic Regression with Penalization: Lasso_
+```{r}
+set.seed(19)
+cvfit <- cv.glmnet(X12.train, y12.train, family = "binomial")
+plot(cvfit)
+```
+
+```{r}
+lambda.op <- cvfit$lambda.min
+print(lambda.op)
+```
+
+**Cross Validation shows that the optimal lambda is $4.85*10^{-5}$. We will then use ROC package to find optimal threshold.**
+
+
+```{r}
+mod2 <- glmnet(X12.train, y12.train, family = "binomial", lambda = lambda.op)
+predictValid <- predict(mod2, X12.valid, type = "response") 
+ROCRpred <- prediction(predictValid, y12.valid)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, print.cutoffs.at=seq(0,1,by=0.1))
+```
+
+**As the ROC curve indicates, applying lasso to a binary classification task has really good out-of-sample performance (shown using validation set) for most cutoffs between 0 and 1. We will take 0.5 as the threshold.**
+
+```{r}
+sum(round(predictValid) == y12.valid)/length(y12.valid)
+```
+**The out-of-sample (using validation set) classification accuracy is 99.96%.**
+
+##### _Model 3: LDA (using PCA reduced data -5 dimensions- to avoid overfitting)_
+```{r}
+mod3 <- lda(X12.train, y12.train)
+predictValid <- predict(mod3, X12.valid)
+sum(predictValid$class == y12.valid)/length(y12.valid)
+```
+
+**The out of sample (using validation set) classification accuracy is 99.75%**
+
+##### _Model Comparison and Final Prediction_
+>Here is the bottomline from binary classification: pants(1) vs shoes(2)
+
+>* model 1: logistic regression has a 99.96% classification accuracy. 
+>* model 2: logistic regression with lasso has a 99.96% classification accuracy.($\lambda= 4.85\times 10^{-5})
+>* model 3: LDA has a 99.75% classification accuracy.
+
+> While model 1 and model 2 have the same accuracy, model 2 is less flexible beacuse of the penalization of lasso. For this task, we will use model 2 for prediction.
+
+```{r}
+## Fitting model 2 with both training and validation set, then reporting out-of-sample classification accuracy with test set
+model <- glmnet(rbind(X12.train, X12.valid), c(y12.train, y12.valid), family = "binomial", lambda = lambda.op)
+pred <- round(predict(model, X12.test, type = "response"))
+sum(pred == y12.test)/length(y12.test)
+```
+
+> Using more data (training + validation) to fit the model, the out-of-sample classification accuracy is 100%.
+
+
+### Binary Classification: pants(1) v. shirts (0)
+
+##### _Model 1: Logistic regression_
+
+```{r}
+mod1 <- glm(formula = y ~ .-y, family=binomial, data = data.frame(X10.train, y = y10.train))
+
+predictValid <- predict.glm(mod1, data.frame(X10.valid), type = "response") 
+ROCRpred <- prediction(predictValid, y10.valid)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, print.cutoffs.at=seq(0,1,by=0.1))
+```
+
+**We want to maximize true positive rate while minimizing false positive rate. We will take 0.5 as the cutoff.**
+```{r}
+sum(round(predictValid) == y10.valid)/length(y10.valid)
+```
+
+**The out-of-sample (using validation set) classification accuracy is 95.75%**
+
+##### _Model 2: Logistic Regression with Penalization: Lasso/Ridge_
+```{r}
+set.seed(10)
+cvfit <- cv.glmnet(X10.train, y10.train, family = "binomial")
+plot(cvfit)
+```
+```{r}
+lambda.op <- cvfit$lambda.min
+print(lambda.op)
+```
+
+**Cross Validation shows that the optimal lambda is $0.00028$. We will then use ROC package to find optimal threshold.**
+
+
+```{r}
+mod2 <- glmnet(X10.train, y10.train, family = "binomial", lambda = lambda.op)
+predictValid <- predict(mod2, X10.valid, type = "response") 
+ROCRpred <- prediction(predictValid, y10.valid)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, print.cutoffs.at=seq(0,1,by=0.1))
+```
+
+**As the ROC curve indicates, applying lasso to a binary classification task has really good out-of-sample performance (shown using validation set) for most cutoffs between 0 and 1. We will take 0.5 as the threshold.**
+
+```{r}
+sum(round(predictValid) == y10.valid)/length(y10.valid)
+```
+**The out-of-sample (using validation set) classification accuracy is 94.67%.**
+
+##### _Model 3: LDA (using PCA reduced data -5 dimensions- to avoid overfitting)_
+```{r}
+mod3 <- lda(X10.train, y10.train)
+predictValid <- predict(mod3, X10.valid)
+sum(predictValid$class == y10.valid)/length(y10.valid)
+```
+**The out-of-sample (using validation set) classification accuracy is 95.125%**
+
+##### _Model Comparison and Final Prediction_
+>Here is the bottomline from binary classification: pants(1) vs shoes(0)
+
+>* model 1: logistic regression has a 95.75% classification accuracy. 
+>* model 2: logistic regression with lasso has a 94.67% classification accuracy.($\lambda= 0.00028$)
+>* model 3: LDA has a 95.125% classification accuracy.
+
+> For this task, we will use model 1 for prediction.
+
+```{r}
+## Fitting model 1 with both training and validation set, then reporting out-of-sample classification accuracy with test set
+
+model <- glm(formula = y ~ .-y, family=binomial, data = data.frame(rbind(X10.train, X10.valid), y = c(y10.train, y10.valid)))
+pred <- round(predict(model, data.frame(X10.test, y = y10.test), type = "response"))
+sum(pred == y10.test)/length(y10.test)
+```
+
+> Using more data (training + validation) to fit the model, the out-of-sample classification accuracy is 95%.
+
+
+### Binary Classification: shoes(2) vs shirt(0)
+
+```{r}
+## transforming y02 into zeros and ones
+
+y02.train <- y02.train/2
+y02.valid <- y02.valid/2
+y02.test <- y02.test/2
+```
+
+##### _Model 1: Logistic regression_
+```{r}
+mod1 <- glm(formula = y ~ .-y, family=binomial, data = data.frame(X02.train, y = y02.train))
+
+predictValid <- predict.glm(mod1, data.frame(X02.valid), type = "response") 
+ROCRpred <- prediction(predictValid, y02.valid)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, print.cutoffs.at=seq(0,1,by=0.1))
+```
+
+**As the ROC curve indicates, the logistic regression has really good out-of-sample performance (shown using validation set) for most cutoffs. We will take 0.5 as the cutoff.**
+
+```{r}
+sum(round(predictValid) == y02.valid)/length(y02.valid)
+```
+**The out-of-sample classification accuracy is 99.96%**
+
+##### _Model 2: Logistic Regression with Penalization: Lasso/Ridges_
+
+```{r}
+set.seed(0)
+cvfit <- cv.glmnet(X02.train, y02.train, family = "binomial")
+plot(cvfit)
+```
+
+```{r}
+lambda.op <- cvfit$lambda.min
+print(lambda.op)
+```
+
+**Cross Validation shows that the optimal lambda is $4.76*10^{-5}$. We will then use ROC package to find optimal threshold.**
+
+
+```{r}
+mod2 <- glmnet(X02.train, y02.train, family = "binomial", lambda = lambda.op)
+predictValid <- predict(mod2, X02.valid, type = "response") 
+ROCRpred <- prediction(predictValid, y02.valid)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, print.cutoffs.at=seq(0,1,by=0.1))
+```
+
+**As the ROC curve indicates, applying lasso to a binary classification task has really good out-of-sample performance (shown using validation set) for most cutoffs between 0 and 1. We will take 0.5 as the threshold.**
+
+```{r}
+sum(round(predictValid) == y02.valid)/length(y02.valid)
+```
+**The out-of-sample (using validation set) classification accuracy is 99.92%.**
+
+
+##### _Model 3: LDA (using PCA reduced data -5 dimensions- to avoid overfitting)_
+```{r}
+mod3 <- lda(X02.train, y02.train)
+predictValid <- predict(mod3, X02.valid)
+sum(predictValid$class == y02.valid)/length(y02.valid)
+```
+**The out-of-sample classification accuracy is 99.71%**
+
+##### _Model Comparison and Final Prediction_
+>Here is the bottomline from binary classification: pants(1) vs shoes(0)
+
+>* model 1: logistic regression has a 99.96% classification accuracy. 
+>* model 2: logistic regression with lasso has a 99.92% classification accuracy.($\lambda= 0.00028$)
+>* model 3: LDA has a 99.71% classification accuracy.
+
+> For this task, we will use model 1 for prediction.
+
+```{r}
+## Fitting model 1 with both training and validation set, then reporting out-of-sample classification accuracy with test set
+
+model <- glm(formula = y ~ .-y, family=binomial, data = data.frame(rbind(X02.train, X02.valid), y = c(y02.train, y02.valid)))
+pred <- round(predict(model, data.frame(X02.test, y = y02.test), type = "response"))
+sum(pred == y02.test)/length(y02.test)
+```
+
+> Using more data (training + validation) to fit the model, the out-of-sample classification accuracy is 99.83%.
+
+
+### Multiclass classification
+
+##### _Model 1: Logistic Regression with Penalization: Lasso_
+
+```{r}
+set.seed(14)
+cvfit <- cv.glmnet(X.train, y.train, family = "multinomial")
+plot(cvfit)
+```
+
+```{r}
+lambda.op <- cvfit$lambda.min
+print(lambda.op)
+```
+
+**Cross Validation shows that the optimal lambda is $7.79*10^{-5}$. We will then use ROC package to find optimal threshold.**
+
+
+```{r}
+mod2 <- glmnet(X.train, y.train, family = "multinomial", lambda = lambda.op)
+predictValid <- predict(mod2, X.valid, type = "response") 
+pred.class <- apply(predictValid, 1, which.max) - 1
+
+sum(pred.class == y.valid)/length(y.valid)
+```
+**The out-of-sample (using validation set) classification accuracy is 97.08%.**
+
+
+##### _Model 2: Random Forest_
+```{r}
+set.seed(71)
+rf <- randomForest(X.train, y = factor(y.train), xtest = X.valid, ytest = factor(y.valid), type = "classification")
+print(rf)
+```
+
+**The out-of-sample (using validation set) classification accuracy is 98.19%.**
+
+##### _Model 3: LDA_
+```{r}
+mod3 <- lda(X.train, y.train)
+predictValid <- predict(mod3, X.valid)
+sum(predictValid$class == y.valid)/length(y.valid)
+```
+**Using a validation set, we see that the classification accuracy for LDA is 96.47%**
+
+##### _Model 4: kNN_
+```{r}
+## Use Validation Set to tune k
+set.seed(250)
+acc_vec <- c()
+for(k in 1:10) {
+  knnPrediction <-  knn(train = X.train, test = X.valid, cl = y.train, k)
+  acc_vec[k] <- sum(knnPrediction == y.valid) / length(y.valid)
+}
+```
+
+```{r}
+plot(1:k, acc_vec, type = "l", main = "accuracy of kNN with different k", xlab = "k")
+acc_vec[2]
+```
+
+
+**It seems that kNN has a consistent accuracy of 97.72%, regardless of values of k. To reduce overfitting, we pick k = 2**
+
+#### _Model Comparison and Final Prediction_
+>Here is the bottomline from multiclass classification
+
+>* model 1: logistic regression with lasso has a 97.08% classification accuracy. ($\lambda= 4.46\times 10^{-5})
+>* model 2: random forest has a 98.19% classification accuracy.
+>* model 3: LDA has a 96.47% classification accuracy.
+>* model 4: kNN has a 97.72% classification accuracy.
+
+> For this task, we will use model 2 for prediction.
+
+```{r}
+## Fitting model 2 with both training and validation set, then reporting out-of-sample classification accuracy with test set
+set.seed(6)
+rf <- randomForest(rbind(X.train, X.valid), y = factor(c(y.train,y.valid)), xtest = X.test, ytest = factor(y.test), type = "classification")
+print(rf)
+```
+
+
+> Using more data (training + validation) to fit a random forest, the out-of-sample classification accuracy is 98.17%.
+
+##### _Bonus visualization_
+
+```{r}
+plot(rf, main="Model accuracy as number of trees increase")
+```
+
+>* The black line is the overall model accuracy
+>* The colored lines are classification accruacies for specific classes
+
+
+##### _Side Question_
+
+In the spec, Professor asked how we could use the binary classification models to for multiclass classification.  
+One could fit three binary classfication models:  
+
+* model 1: class = 0 vs. all else
+* model 2: class = 1 vs. all else
+* model 3: class = 2 vs. all else
+
+For prediction, run all three classifers and then record 
+
+* from model 1: prob(class = 0)
+* from model 2: prob(class = 1)
+* from model 3: prob(class = 2)
+
+The predicted class should be the one with maximum likelihood (i.e. among the probabilities recorded above).
